@@ -1,0 +1,3 @@
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+accelerate launch finetuning.py --model_name HuggingFaceTB/SmolLM2-1.7B-Instruct --dataset.file datasets/loader/squad.py --lr 1e-6 --num_epochs 100 --batch_size_training 12 --val_batch_size 10 --output_dir /data/nvme3n1p1/adal_workspace/v2_distilation_process/models/smolm2_scp --distillation_config.model_name /data/nvme3n1p1/adal_workspace/distilation_process/llm-recipes/checkpoints/Meta-Llama-3.1-8B-Instruct --distillation --distillation_config.enable_fsdp --distillation_config.pure_bf16 --distillation_config.distil_factor 1.5 --save_step 10 --context_length 8192
