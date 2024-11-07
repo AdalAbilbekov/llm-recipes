@@ -10,7 +10,7 @@ from models.distillation_model import DistillationModel
 from optimum.bettertransformer import BetterTransformer
 from transformers import AutoModelForCausalLM, MT5ForConditionalGeneration, AutoTokenizer
 from configs.configs_utils import generate_peft_config, update_config
-from peft import get_peft_model, prepare_model_for_int8_training
+from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLayer
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
@@ -80,7 +80,7 @@ def load_model(train_config, rank):
 
 def set_model(model, train_config, fsdp_config, rank, kwargs):
     if train_config.quantization:
-        model = prepare_model_for_int8_training(model)
+        model = prepare_model_for_kbit_training(model)
 
     if train_config.use_peft:
         peft_config = generate_peft_config(train_config, kwargs)
