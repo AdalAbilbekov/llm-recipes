@@ -1,6 +1,6 @@
 import os
 import sys
-from datasets import load_from_disk, load_dataset
+from datasets import load_from_disk, load_dataset, Dataset, DatasetDict
 
 sys.path.append(f"{os.getenv('HOME')}/llm-distillation")
 from prompt.prompt import create_chat_prompt
@@ -44,7 +44,7 @@ def tokenize(item, tokenizer, encoder_decoder=False):
         )
 
     context_tokens = tokenizer.encode(f"{tokenizer.bos_token} {prompt}", add_special_tokens=False)
-   
+  
     if not encoder_decoder:
         if 'chat' in tokenizer.name_or_path.lower() or "instruct" in tokenizer.name_or_path.lower():# Added additional part based on the tokenizer.
             # context_tokens = tokenizer.encode(f"{prompt}", add_special_tokens=False)
@@ -75,11 +75,11 @@ def tokenize(item, tokenizer, encoder_decoder=False):
             "attention_mask": [1]*len(input_ids)
         }
 
-def get_split(dataset_config, tokenizer, split):
-    # dataset = load_dataset('Nicolas-BZRD/uld_loss_Llama-2-7b-chat-hf-squad', data_dir='data') The origina Dataset
-    # Based on my datasets columns have to be chnaged as follows: instruction -> context | input -> question | output -> answers_generated
-    dataset = load_dataset('AdalAbilbekov/arc_distill_test_ENKK', data_dir='data')
-    dataset = dataset[split]
+def get_split(dataset_config, tokenizer, split, dataset):
+   
+    dataset = dataset
+    
     if dataset_config.training_size < 1: dataset = dataset.select(range(int(len(dataset)*dataset_config.training_size)))
     dataset = dataset.map(lambda item: tokenize(item, tokenizer, dataset_config.encoder_decoder), remove_columns=list(dataset.features))
+    
     return dataset
