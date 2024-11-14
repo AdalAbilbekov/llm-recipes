@@ -65,7 +65,7 @@ def main(**kwargs):
                                                                             "output":"answers_generated"}
                                                                         )
     
-    dataset = global_ds['train'].train_test_split(test_size=0.001, seed=1234)
+    dataset = global_ds['train'].train_test_split(test_size=train_config.val_set_length, seed=1234)
 
     dataset_train, dataset_val = dataset['train'], dataset['test']
 
@@ -74,9 +74,9 @@ def main(**kwargs):
         "validation":dataset_val
     })
 
-    length_train_dataloader =  dataset['train'].shape[0] // 8
-    total_numbers_in_dataloader = dataset['train'].shape[0] // 1000
-    the_rest = (dataset['train'].shape[0] - total_numbers_in_dataloader * 1000) // 8
+    length_train_dataloader =  dataset['train'].shape[0] // train_config.batch_size_training
+    total_numbers_in_dataloader = dataset['train'].shape[0] // train_config.subset_length
+    the_rest = (dataset['train'].shape[0] - total_numbers_in_dataloader * train_config.subset_length) // train_config.batch_size_training
 
     # Load Model and Tokenizer
     if train_config.distillation:
@@ -122,25 +122,6 @@ def main(**kwargs):
             }
         )
 
-    # results = train(
-    #     model,
-    #     train_dataloader,
-    #     eval_dataloader,
-    #     optimizer,
-    #     scheduler,
-    #     train_config.gradient_accumulation_steps,
-    #     train_config,
-    #     distil_config,
-    #     data_config,
-    #     teacher_train_dataloader if train_config.distillation else None,
-    #     teacher_eval_dataloader if train_config.distillation else None,
-    #     fsdp_config if train_config.enable_fsdp else None,
-    #     local_rank if train_config.enable_fsdp or distil_config.enable_fsdp else None,
-    #     rank,
-    # )
-    # if rank == 0:
-    #     [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
-
     if train_config.distillation:
         distillation_loss = DistillationLoss(distillation_weight=distil_config.distil_factor, student_temperature=distil_config.student_temperature, teacher_temperature=distil_config.teacher_temperature, skip_student_eos=True, debug=True, debug_rank=0, tokenizer_student=model.student.name_or_path, tokenizer_teacher=model.teacher.name_or_path)
 
@@ -177,33 +158,39 @@ def main(**kwargs):
     
     steps_per_eval = len(eval_dataloader)
 
+    steps_per_epoch = (train_config.subset_length // (4 * 8 * train_config.batch_size_training)) * total_numbers_in_dataloader
+    total_length = steps_per_epoch//gradient_accumulation_steps
 
     for epoch in range(train_config.num_epochs):
         epoch_start_time = time.perf_counter()
         global_step = 0
+        with MemoryTrace() as memtrace:
+            total_loss = 0.0
+            pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
         # for one_step in range(total_numbers_in_dataloader):
-        for one_step in range(2):
-            # Load Data
-            mini_chunk_ds = dataset['train'].select(range(one_step * 100, (one_step + 1) * 100))
-            data_config.encoder_decoder = train_config.encoder_decoder
-            if train_config.distillation:
-                train_dataloader, teacher_train_dataloader = get_distillation_dataloader_custom(data_config, 
-                                                                                                train_config, 
-                                                                                                distil_config, 
-                                                                                                student_tokenizer, 
-                                                                                                teacher_tokenizer, 
-                                                                                                rank,
-                                                                                                dataset=mini_chunk_ds)
-            else:
-                train_dataloader, eval_dataloader = get_dataloader(data_config, train_config, tokenizer, rank)
+            for one_step in range(total_numbers_in_dataloader):
+                # Load Data
+                mini_chunk_ds = dataset['train'].select(range(one_step * train_config.subset_length, (one_step + 1) * train_config.subset_length))
+                data_config.encoder_decoder = train_config.encoder_decoder
+                if train_config.distillation:
+                    if train_dataloader is not None:
+                        del train_dataloader
+                        del teacher_train_dataloader
+                        torch.cuda.empty_cache()
+                    train_dataloader, teacher_train_dataloader = get_distillation_dataloader_custom(data_config, 
+                                                                                                    train_config, 
+                                                                                                    distil_config, 
+                                                                                                    student_tokenizer, 
+                                                                                                    teacher_tokenizer, 
+                                                                                                    rank,
+                                                                                                    dataset=mini_chunk_ds)
+                else:
+                    train_dataloader, eval_dataloader = get_dataloader(data_config, train_config, tokenizer, rank)
 
-            steps_per_epoch = len(train_dataloader)
+                # steps_per_epoch = len(train_dataloader)
 
-            total_length = steps_per_epoch//gradient_accumulation_steps
-            model.student.train() if train_config.distillation else model.train()
-            with MemoryTrace() as memtrace:
-                total_loss = 0.0
-                pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)          
+                # total_length = steps_per_epoch//gradient_accumulation_steps
+                model.student.train() if train_config.distillation else model.train()          
                 for step, batch in enumerate(train_dataloader if not train_config.distillation else zip(train_dataloader, teacher_train_dataloader)):
                     if train_config.distillation: batch = preprocess_distillation_batch(batch)
                     for key in batch.keys():
@@ -234,6 +221,7 @@ def main(**kwargs):
                             optimizer.step()
                             optimizer.zero_grad()
                             pbar.update()
+                            clear_gpu_cache(rank)
 
                     if rank == 0:
                         if train_config.distillation:
@@ -251,16 +239,16 @@ def main(**kwargs):
                             })
 
                     lr_scheduler.step()
-                    global_step += 1
-                    pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{steps_per_epoch} completed (loss: {loss.detach().float()})")
+                    pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {global_step}/{steps_per_epoch} completed (loss: {loss.detach().float()})")
 
-                    if train_config.run_validation and ((global_step+1) % train_config.save_step == 0 or global_step+1 == steps_per_epoch):
+                    # if train_config.run_validation and ((global_step+1) % train_config.save_step == 0 or global_step+1 == steps_per_epoch):
+                    if train_config.run_validation and (global_step+1) % train_config.save_step == 0:
                         if rank == 0: print("Running evaluation...")
                         model.eval()
                         eval_ppl, eval_epoch_loss, eval_cross_loss, eval_dist_loss = evaluation(
                             model, train_config, distil_config, 
                             eval_dataloader if not train_config.distillation else zip(eval_dataloader, teacher_eval_dataloader),
-                            steps_per_eval, rank)
+                            steps_per_eval, local_rank)
                         model.student.train() if train_config.distillation else model.train()
                         val_loss.append(eval_epoch_loss)
                         val_ppl.append(eval_ppl)
@@ -294,53 +282,54 @@ def main(**kwargs):
                                 checkpoint_end_time = time.perf_counter() - checkpoint_start_time
                                 checkpoint_times.append(checkpoint_end_time)
                         clear_gpu_cache(rank)
-                pbar.close()
+                    global_step += 1
+            pbar.close()
 
-            if rank == 0: print(memtrace)
-            epoch_end_time = time.perf_counter()-epoch_start_time
-            epoch_times.append(epoch_end_time)
+        if rank == 0: print(memtrace)
+        epoch_end_time = time.perf_counter()-epoch_start_time
+        epoch_times.append(epoch_end_time)
 
-            if torch.cuda.device_count() > 1 and train_config.enable_fsdp or distil_config.enable_fsdp:
-                dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-            train_epoch_loss = total_loss / steps_per_epoch
-            if train_config.enable_fsdp:
-                train_epoch_loss = train_epoch_loss/world_size
-            train_perplexity = torch.exp(train_epoch_loss)
+        if torch.cuda.device_count() > 1 and train_config.enable_fsdp or distil_config.enable_fsdp:
+            dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        train_epoch_loss = total_loss / steps_per_epoch
+        if train_config.enable_fsdp:
+            train_epoch_loss = train_epoch_loss/world_size
+        train_perplexity = torch.exp(train_epoch_loss)
 
-            train_prep.append(train_perplexity)
-            train_loss.append(train_epoch_loss)
+        train_prep.append(train_perplexity)
+        train_loss.append(train_epoch_loss)
 
-            if rank == 0:
-                print(
-                    f"Epoch {epoch+1}: train_perplexity={train_perplexity:.4f}, train_epoch_loss={train_epoch_loss:.4f}, epoch time {epoch_end_time}s")
-                wandb.log({
-                    "train_perplexity": train_perplexity,
-                    "train_epoch_loss": train_epoch_loss,
-                    "train_epoch_time": epoch_end_time
-                })
-
-        avg_epoch_time = sum(epoch_times) / len(epoch_times)
-        avg_checkpoint_time = sum(
-            checkpoint_times) / len(checkpoint_times) if len(checkpoint_times) > 0 else 0
-        avg_train_prep = sum(train_prep)/len(train_prep)
-        avg_train_loss = sum(train_loss)/len(train_loss)
-        if train_config.run_validation:
-            avg_eval_prep = sum(val_ppl)/len(val_ppl)
-            avg_eval_loss = sum(val_loss)/len(val_loss)
-
-        results['avg_train_prep'] = avg_train_prep
-        results['avg_train_loss'] = avg_train_loss
-        if train_config.run_validation:
-            results['avg_eval_prep'] = avg_eval_prep
-            results['avg_eval_loss'] = avg_eval_loss
-        results["avg_epoch_time"] = avg_epoch_time
-        results["avg_checkpoint_time"] = avg_checkpoint_time
-
-        if train_config.enable_fsdp and not train_config.use_peft:
-            save_train_params(train_config, fsdp_config, rank)
-        
         if rank == 0:
-            [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
+            print(
+                f"Epoch {epoch+1}: train_perplexity={train_perplexity:.4f}, train_epoch_loss={train_epoch_loss:.4f}, epoch time {epoch_end_time}s")
+            wandb.log({
+                "train_perplexity": train_perplexity,
+                "train_epoch_loss": train_epoch_loss,
+                "train_epoch_time": epoch_end_time
+            })
+
+    avg_epoch_time = sum(epoch_times) / len(epoch_times)
+    avg_checkpoint_time = sum(
+        checkpoint_times) / len(checkpoint_times) if len(checkpoint_times) > 0 else 0
+    avg_train_prep = sum(train_prep)/len(train_prep)
+    avg_train_loss = sum(train_loss)/len(train_loss)
+    if train_config.run_validation:
+        avg_eval_prep = sum(val_ppl)/len(val_ppl)
+        avg_eval_loss = sum(val_loss)/len(val_loss)
+
+    results['avg_train_prep'] = avg_train_prep
+    results['avg_train_loss'] = avg_train_loss
+    if train_config.run_validation:
+        results['avg_eval_prep'] = avg_eval_prep
+        results['avg_eval_loss'] = avg_eval_loss
+    results["avg_epoch_time"] = avg_epoch_time
+    results["avg_checkpoint_time"] = avg_checkpoint_time
+
+    if train_config.enable_fsdp and not train_config.use_peft:
+        save_train_params(train_config, fsdp_config, rank)
+    
+    if rank == 0:
+        [print(f'Key: {k}, Value: {v}') for k, v in results.items()]
 
 if __name__ == "__main__":
     fire.Fire(main)
