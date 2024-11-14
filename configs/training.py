@@ -4,7 +4,7 @@ from dataclasses import dataclass
 class train_config:
     project_name: str=None
     model_name: str="meta-llama/Llama-2-7b-hf"
-    enable_fsdp: bool=False
+    enable_fsdp: bool=True
     low_cpu_fsdp: bool=False
     run_validation: bool=True
     batch_size_training: int=8
@@ -36,3 +36,7 @@ class train_config:
     save_all: bool = False
     training_size: int = 1
     encoder_decoder: bool = False
+    dist_checkpoint_root_folder: str = "/data/nvme3n1p1/adal_workspace/v2_distillation/checkpoints"
+    dist_checkpoint_folder: str = "kd_train_param"
+    subset_length: str = 10000
+    val_set_length: str = 5000
