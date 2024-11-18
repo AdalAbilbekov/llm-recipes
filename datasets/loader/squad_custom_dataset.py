@@ -75,22 +75,22 @@ def tokenize(item, tokenizer, encoder_decoder=False):
             "attention_mask": [1]*len(input_ids)
         }
 
-def get_split(dataset_config, tokenizer, split, dataset_path):
+def get_split(dataset_config, tokenizer, split):
     # dataset = load_dataset('Nicolas-BZRD/uld_loss_Llama-2-7b-chat-hf-squad', data_dir='data') The origina Dataset
     # Based on my datasets columns have to be chnaged as follows: instruction -> context | input -> question | output -> answers_generated
     
     # dataset = load_dataset('AdalAbilbekov/arc_distill_test_ENKK', data_dir='data')
 
-    dataset = load_dataset('json', data_files=dataset_path).rename_columns(
+    dataset = load_dataset('json', data_files=dataset_config.dataset_path).rename_columns(
         {"instruction":"context",
         "input":"question",
         "output":"answers_generated"}
     )
     
-    try:
-        dataset = dataset['train'].train_test_split(test_size=0.001)
-    except:
-        dataset = dataset['train'].train_test_split(test_size=1)
+    # try:
+    #     dataset = dataset['train'].train_test_split(test_size=0.001)
+    # except:
+    dataset = dataset['train'].train_test_split(test_size=1000)
     dataset_train, dataset_val = dataset['train'], dataset['test']
     
     dataset = DatasetDict({
@@ -100,6 +100,8 @@ def get_split(dataset_config, tokenizer, split, dataset_path):
 
     dataset = dataset[split]
     if dataset_config.training_size < 1: dataset = dataset.select(range(int(len(dataset)*dataset_config.training_size)))
-    dataset = dataset.map(lambda item: tokenize(item, tokenizer, dataset_config.encoder_decoder), remove_columns=list(dataset.features))
+    dataset = dataset.map(lambda item: tokenize(item, tokenizer, dataset_config.encoder_decoder), 
+                          remove_columns=list(dataset.features),
+                          num_proc=8)
     
     return dataset
