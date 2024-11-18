@@ -48,8 +48,8 @@ def get_dataset(dataset_config, tokenizer, split: str, dataset) -> torch.utils.d
 
 
 def get_dataloader(dataset_config, train_config, tokenizer, rank, distil_config=None, dataset=None):
-    global sort_index
-    global sort_index_val
+    # global sort_index
+    # global sort_index_val
 
     dataset_train = get_dataset(
         dataset_config,
@@ -57,16 +57,17 @@ def get_dataloader(dataset_config, train_config, tokenizer, rank, distil_config=
         split="train",
         dataset=dataset
     )
-
+    
     if train_config.batching_strategy == "packing":
         dataset_train = ConcatDataset(
             dataset_train, chunk_size=train_config.context_length)
-    
 
-    if train_config.context_length and not sort_index:
-        sort_index = [idx for idx, ex in enumerate(dataset_train) if len(ex['input_ids']) <= train_config.context_length]
-    if train_config.context_length and sort_index:
-        dataset_train = dataset_train.select(sort_index)
+    # Removed conditions due two different get_distillation_dataloader_custom and get_distillation_dataloader_custom_validation functions
+    # if train_config.context_length and not sort_index:
+    sort_index = [idx for idx, ex in enumerate(dataset_train) if len(ex['input_ids']) <= 2048 and len([el for el in ex['labels'] if el != -100]) <= 2048]
+    # if train_config.context_length and sort_index:
+    dataset_train = dataset_train.select(sort_index)
+    
 
     train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, tokenizer, "train", distil_config)
     train_dataloader = torch.utils.data.DataLoader(
@@ -83,8 +84,8 @@ def get_dataloader(dataset_config, train_config, tokenizer, rank, distil_config=
     return train_dataloader
 
 def get_dataloader_val(dataset_config, train_config, tokenizer, rank, distil_config=None, dataset=None):
-    global sort_index
-    global sort_index_val
+    # global sort_index
+    # global sort_index_val
 
     dataset_val = get_dataset(
             dataset_config,
@@ -93,10 +94,11 @@ def get_dataloader_val(dataset_config, train_config, tokenizer, rank, distil_con
             dataset=dataset
         )
 
-    if train_config.context_length and not sort_index_val:
-        sort_index_val = [idx for idx, ex in enumerate(dataset_val) if len(ex['input_ids']) <= train_config.context_length]
-    if sort_index_val:
-        dataset_val = dataset_val.select(sort_index_val)
+    # Removed conditions due two different get_distillation_dataloader_custom and get_distillation_dataloader_custom_validation functions
+    # if train_config.context_length and not sort_index_val:
+    sort_index_val = [idx for idx, ex in enumerate(dataset_val) if len(ex['input_ids']) <= train_config.context_length]
+    # if sort_index_val:
+    dataset_val = dataset_val.select(sort_index_val)
 
     if train_config.batching_strategy == "packing":
         dataset_val = ConcatDataset(
