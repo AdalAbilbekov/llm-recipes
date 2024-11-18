@@ -123,7 +123,7 @@ def main(**kwargs):
         )
 
     if train_config.distillation:
-        distillation_loss = DistillationLoss(distillation_weight=distil_config.distil_factor, student_temperature=distil_config.student_temperature, teacher_temperature=distil_config.teacher_temperature, skip_student_eos=True, debug=True, debug_rank=0, tokenizer_student=model.student.name_or_path, tokenizer_teacher=model.teacher.name_or_path)
+        distillation_loss = DistillationLoss(distillation_weight=distil_config.distil_factor, student_temperature=distil_config.student_temperature, teacher_temperature=distil_config.teacher_temperature, skip_student_eos=True, debug=False, debug_rank=0, tokenizer_student=model.student.name_or_path, tokenizer_teacher=model.teacher.name_or_path)
 
     # Create a gradient scaler for fp16
     if train_config.use_fp16 and train_config.enable_fsdp:
@@ -157,6 +157,7 @@ def main(**kwargs):
                                                                                     dataset=evaluation_dataset)
     
     steps_per_eval = len(eval_dataloader)
+    train_dataloader = None
 
     steps_per_epoch = (train_config.subset_length // (4 * 8 * train_config.batch_size_training)) * total_numbers_in_dataloader
     total_length = steps_per_epoch//gradient_accumulation_steps
@@ -164,33 +165,36 @@ def main(**kwargs):
     for epoch in range(train_config.num_epochs):
         epoch_start_time = time.perf_counter()
         global_step = 0
-        with MemoryTrace() as memtrace:
-            total_loss = 0.0
-            pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
+        pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
         # for one_step in range(total_numbers_in_dataloader):
-            for one_step in range(total_numbers_in_dataloader):
-                # Load Data
-                mini_chunk_ds = dataset['train'].select(range(one_step * train_config.subset_length, (one_step + 1) * train_config.subset_length))
-                data_config.encoder_decoder = train_config.encoder_decoder
-                if train_config.distillation:
-                    if train_dataloader is not None:
-                        del train_dataloader
-                        del teacher_train_dataloader
-                        torch.cuda.empty_cache()
-                    train_dataloader, teacher_train_dataloader = get_distillation_dataloader_custom(data_config, 
-                                                                                                    train_config, 
-                                                                                                    distil_config, 
-                                                                                                    student_tokenizer, 
-                                                                                                    teacher_tokenizer, 
-                                                                                                    rank,
-                                                                                                    dataset=mini_chunk_ds)
-                else:
-                    train_dataloader, eval_dataloader = get_dataloader(data_config, train_config, tokenizer, rank)
+        for one_step in range(total_numbers_in_dataloader):
+            # Load Data
+            start_index = one_step * train_config.subset_length
+            end_index = min((one_step + 1) * train_config.subset_length, len(dataset['train']))
+            print(f"Start: {start_index} | End {end_index}")
+            mini_chunk_ds = dataset['train'].select(range(start_index, end_index))
+            data_config.encoder_decoder = train_config.encoder_decoder
+            if train_config.distillation:
+                if train_dataloader is not None:
+                    del train_dataloader
+                    del teacher_train_dataloader
+                    torch.cuda.empty_cache()
+                train_dataloader, teacher_train_dataloader = get_distillation_dataloader_custom(data_config, 
+                                                                                                train_config, 
+                                                                                                distil_config, 
+                                                                                                student_tokenizer, 
+                                                                                                teacher_tokenizer, 
+                                                                                                rank,
+                                                                                                dataset=mini_chunk_ds)
+            else:
+                train_dataloader, eval_dataloader = get_dataloader(data_config, train_config, tokenizer, rank)
 
-                # steps_per_epoch = len(train_dataloader)
+            # steps_per_epoch = len(train_dataloader)
 
-                # total_length = steps_per_epoch//gradient_accumulation_steps
-                model.student.train() if train_config.distillation else model.train()          
+            # total_length = steps_per_epoch//gradient_accumulation_steps
+            model.student.train() if train_config.distillation else model.train()
+            with MemoryTrace() as memtrace:
+                total_loss = 0.0      
                 for step, batch in enumerate(train_dataloader if not train_config.distillation else zip(train_dataloader, teacher_train_dataloader)):
                     if train_config.distillation: batch = preprocess_distillation_batch(batch)
                     for key in batch.keys():
@@ -201,7 +205,7 @@ def main(**kwargs):
 
                     with autocast():
                         if train_config.distillation:
-                            student_output, teacher_output = model(**batch)
+                            student_output, teacher_output = model(**batch)     
                             loss, cross_loss, dist_loss = distillation_loss(student_output, teacher_output, batch['student_labels'], batch['teacher_labels'], rank=rank)
                         else:
                             loss = model(**batch).loss
@@ -283,30 +287,31 @@ def main(**kwargs):
                                 checkpoint_times.append(checkpoint_end_time)
                         clear_gpu_cache(rank)
                     global_step += 1
-            pbar.close()
+            
 
-        if rank == 0: print(memtrace)
-        epoch_end_time = time.perf_counter()-epoch_start_time
-        epoch_times.append(epoch_end_time)
+            if rank == 0: print(memtrace)
+            epoch_end_time = time.perf_counter()-epoch_start_time
+            epoch_times.append(epoch_end_time)
 
-        if torch.cuda.device_count() > 1 and train_config.enable_fsdp or distil_config.enable_fsdp:
-            dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        train_epoch_loss = total_loss / steps_per_epoch
-        if train_config.enable_fsdp:
-            train_epoch_loss = train_epoch_loss/world_size
-        train_perplexity = torch.exp(train_epoch_loss)
+            if torch.cuda.device_count() > 1 and train_config.enable_fsdp or distil_config.enable_fsdp:
+                dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+            train_epoch_loss = total_loss / steps_per_epoch
+            if train_config.enable_fsdp:
+                train_epoch_loss = train_epoch_loss/world_size
+            train_perplexity = torch.exp(train_epoch_loss)
 
-        train_prep.append(train_perplexity)
-        train_loss.append(train_epoch_loss)
+            train_prep.append(train_perplexity)
+            train_loss.append(train_epoch_loss)
 
-        if rank == 0:
-            print(
-                f"Epoch {epoch+1}: train_perplexity={train_perplexity:.4f}, train_epoch_loss={train_epoch_loss:.4f}, epoch time {epoch_end_time}s")
-            wandb.log({
-                "train_perplexity": train_perplexity,
-                "train_epoch_loss": train_epoch_loss,
-                "train_epoch_time": epoch_end_time
-            })
+            if rank == 0:
+                print(
+                    f"Epoch {epoch+1}: train_perplexity={train_perplexity:.4f}, train_epoch_loss={train_epoch_loss:.4f}, epoch time {epoch_end_time}s")
+                wandb.log({
+                    "train_perplexity": train_perplexity,
+                    "train_epoch_loss": train_epoch_loss,
+                    "train_epoch_time": epoch_end_time
+                })
+        pbar.close()
 
     avg_epoch_time = sum(epoch_times) / len(epoch_times)
     avg_checkpoint_time = sum(
